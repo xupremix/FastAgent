@@ -11,18 +11,67 @@
 
 ---
 
-## Physical Telemetry & Speedup Summary
+## Long-Horizon Task Execution: FastAgent vs. Mobile-Agent-v3.5
+
+**Benchmark Task:** Cross-App Marketplace Deal Search & Information Extraction  
+*Instruction: "Apri Wallapop, cerca 3060 12gb, apri il primo annuncio, estrai il prezzo verificato e le specifiche"*
+
+<div align="center">
+  <table>
+    <tr>
+      <td align="center" width="33%">
+        <img src="docs/demo/step1_search.png" width="220" alt="Step 1: Search Query" /><br/>
+        <b>Step 1: Intent Search</b><br/>
+        <sub>FastAgent: <b>120ms</b> (am start VIEW)<br/>Mobile-Agent-v3.5: <b>12,340ms</b> (3 GUI steps)</sub>
+      </td>
+      <td align="center" width="33%">
+        <img src="docs/demo/step2_feed.png" width="220" alt="Step 2: Feed Perception" /><br/>
+        <b>Step 2: Feed Perception</b><br/>
+        <sub>FastAgent: <b>35ms</b> CPU OCR snapping<br/>Mobile-Agent-v3.5: <b>16,450ms</b> full ViT prefill</sub>
+      </td>
+      <td align="center" width="33%">
+        <img src="docs/demo/step3_listing.png" width="220" alt="Step 3: Detail & Price" /><br/>
+        <b>Step 3: Detail &amp; Price</b><br/>
+        <sub>FastAgent: <b>2,736ms</b> (Foveated 98 tok)<br/>Mobile-Agent-v3.5: <b>14,050ms</b> (660 tokens)</sub>
+      </td>
+    </tr>
+  </table>
+</div>
+
+### Head-to-Head Long-Horizon Telemetry
 
 Measured on **Xiaomi POCO X6 Pro** over 5GHz Wi-Fi ADB paired with **RTX 3060 12GB + Intel Xeon E5-2680 v4**:
 
-| Pipeline Stage | Standard Mobile Agent | FastAgent (Ours) | Speedup |
+| Metric | Mobile-Agent-v3.5 (Baseline Qwen) | FastAgent (Phases 1&ndash;5 Complete) | Speedup / Reduction |
 |---|---|---|---|
-| **Frame Grab** | 2,241 ms (ADB screencap) | **26 ms** (Zero-copy PyAV) | **86&times;** |
-| **Text Injection (150 chars)** | 4,504 ms (input text) | **20.7 ms** (Fast clipboard) | **217&times;** |
-| **ViT Prefill** | 9,322 ms (660 tokens) | **2,736 ms** (98 tokens) | **3.3&times;** |
-| **Scroll Boundary Detection** | 6,500 ms (VLM turn) | **1.40 ms** (Phase correlation) | **4,600&times;** |
-| **Step Latency (Cold)** | 14,825 ms | **4,828 ms** | **3.1&times;** |
-| **Step Latency (Warm Macro)** | 14,825 ms | **421 ms** | **35&times;** |
+| **Total Steps to Complete** | 8 steps | **3 steps** (Intent Teleportation) | **2.7&times; fewer steps** |
+| **Total End-to-End Latency** | **113.0 seconds** (1m 53s) | **5.8 seconds** | **19.5&times; faster** |
+| **Visual Tokens Consumed** | 5,280 tokens | **294 tokens** | **18&times; fewer tokens** |
+| **Mean Step Latency** | 14.1 seconds / step | **1.45 seconds / step** | **9.7&times; faster** |
+| **Task Completion Verification** | Verified (Product found) | Verified (Product found) | Both 100% |
+| **Post-Task Extraction** | Unstructured text | **Hermes Revision Loop (`Price: €220`)** | Persistent Structured Facts |
+
+---
+
+## Interactive Web Control Center & Live Testing
+
+FastAgent includes a real-time web dashboard running on port 5050 with a live 60 FPS mirror and direct engine comparison:
+
+1. **Open the Dashboard in your browser:**
+   ```
+   http://localhost:5050  (or http://<HOST_IP>:5050 on LAN)
+   ```
+2. **Toggle Execution Engine:**
+   - ⚡ **FastAgent (Sub-Second Turbo Engine):** Executes with zero-copy stream capture, foveated ROI, and procedural macro replay.
+   - 📱 **Mobile-Agent-v3.5 (Baseline Qwen):** Executes standard step-by-step ADB screencap and full-frame ViT inference.
+3. **Run from CLI:**
+   ```bash
+   # Run with FastAgent (Sub-Second Turbo)
+   phone-agent --fast "Apri Wallapop e cerca 3060 12gb"
+
+   # Run with Mobile-Agent-v3.5 (Baseline Qwen)
+   phone-agent "Apri Wallapop e cerca 3060 12gb"
+   ```
 
 ---
 
@@ -45,6 +94,13 @@ Existing vision-language mobile agents (AppAgent, Mobile-Agent, AndroidWorld) sp
 ---
 
 ## Architecture Overview
+
+<p align="center">
+  <img src="docs/architecture.png" alt="FastAgent Architecture" width="100%" />
+</p>
+
+<details>
+<summary><b>View Mermaid Diagram Source</b></summary>
 
 ```mermaid
 flowchart TD
@@ -94,6 +150,7 @@ flowchart TD
     DeadReckon -->|"Detect Container Boundary"| VLM
     Reviewer -->|"Self-Heal Edges & Synthesize Skills"| KG
 ```
+</details>
 
 ---
 

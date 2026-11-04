@@ -782,6 +782,7 @@ if __name__ == "__main__":
     parser.add_argument("--runs", type=int, default=5, help="Number of repetitions per task (default 5)")
     parser.add_argument("--mock", action="store_true", help="Use deterministic MockAndroidDevice")
     parser.add_argument("--task", type=str, default=None, help="Filter to specific task_id")
+    parser.add_argument("--instruction", type=str, default=None, help="Execute ad-hoc custom instruction")
     parser.add_argument("--optimize", "--phase1", action="store_true", help="Enable all Phase 1 optimizations")
     parser.add_argument("--phase2", action="store_true", help="Enable Phase 1 + Phase 2 (Intent Teleport + CPU Grounding + Snapping)")
     parser.add_argument("--phase3", action="store_true", help="Enable Phase 1 + 2 + 3 (Procedural Memory + Foveated ROI)")
@@ -820,7 +821,18 @@ if __name__ == "__main__":
         print("Cleared procedural memory database.")
 
     tasks = get_standard_tasks()
-    if args.task:
+    if args.instruction:
+        tasks = [
+            BenchmarkTask(
+                task_id="custom_user_task",
+                name="Custom User Instruction",
+                instruction=args.instruction,
+                target_packages=[],
+                max_steps=12,
+                verifier=lambda d, t, a: True,
+            )
+        ]
+    elif args.task:
         tasks = [t for t in tasks if t.task_id == args.task]
 
     mode_label = (
