@@ -25,6 +25,38 @@ from fast_agent.contracts import NormalizedPoint, NormalizedRect
 from fast_agent.scrcpy_client import ScrcpyControlClient
 from fast_agent.stream_capture import ScrcpyStreamCapture
 
+COMMON_APP_MAP: Dict[str, str] = {
+    "subito": "it.subito",
+    "vinted": "fr.vinted",
+    "wallapop": "com.wallapop",
+    "telegram": "org.telegram.messenger",
+    "whatsapp": "com.whatsapp",
+    "settings": "com.android.settings",
+    "impostazioni": "com.android.settings",
+    "notes": "com.miui.notes",
+    "note": "com.miui.notes",
+    "gallery": "com.miui.gallery",
+    "galleria": "com.miui.gallery",
+    "calculator": "com.miui.calculator",
+    "calcolatrice": "com.miui.calculator",
+    "youtube": "app.revanced.android.youtube",
+    "chrome": "com.android.chrome",
+    "browser": "com.android.browser",
+    "playstore": "com.android.vending",
+    "maps": "com.google.android.apps.maps",
+    "camera": "com.android.camera",
+    "clock": "com.android.deskclock",
+    "orologio": "com.android.deskclock",
+    "sveglia": "com.android.deskclock",
+    "contacts": "com.android.contacts",
+    "rubrica": "com.android.contacts",
+    "gmail": "com.google.android.gm",
+    "messages": "com.google.android.apps.messaging",
+    "messaggi": "com.google.android.apps.messaging",
+    "security": "com.miui.securitycenter",
+    "sicurezza": "com.miui.securitycenter",
+}
+
 
 class AndroidDevice(ABC):
     """Abstract interface for Android device automation."""
@@ -95,6 +127,16 @@ class AndroidDevice(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def resolve_package_name(self, app_name: str) -> Optional[str]:
+        """Resolve a colloquial or localized application name to an Android package name."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def resolve_and_launch_app(self, app_name: str) -> bool:
+        """Resolve and launch an application by colloquial name or package."""
+        raise NotImplementedError
+
+    @abstractmethod
     def force_stop(self, package_name: str) -> None:
         """Force-stop an application."""
         raise NotImplementedError
@@ -133,6 +175,7 @@ class AdbDevice(AndroidDevice):
         self._settler: Optional[AdaptiveSettler] = None
         self._heartbeat_running = False
         self._heartbeat_thread: Optional[subprocess.Popen[bytes]] = None
+        self._installed_packages_cache: Optional[List[str]] = None
 
         if self.config.enable_scrcpy_socket:
             self._scrcpy = ScrcpyControlClient(self.config)
@@ -321,11 +364,77 @@ class AdbDevice(AndroidDevice):
             return match.group(1)
         return ""
 
+    def get_installed_packages(self, refresh: bool = False) -> List[str]:
+        """Fetch and cache list of installed package names on device."""
+        if self._installed_packages_cache is not None and not refresh:
+            return self._installed_packages_cache
+        res = self._run_shell("pm list packages")
+        pkgs: List[str] = []
+        for line in res.splitlines():
+            line = line.strip()
+            if line.startswith("package:"):
+                line = line[len("package:"):].strip()
+            if line:
+                pkgs.append(line)
+        self._installed_packages_cache = sorted(set(pkgs))
+        return self._installed_packages_cache
+
+    def resolve_package_name(self, app_name: str) -> Optional[str]:
+        """Resolve colloquial, localized or partial app name to installed Android package."""
+        raw = app_name.strip()
+        if not raw:
+            return None
+        norm = raw.lower().replace(" ", "").replace("-", "").replace("_", "")
+
+        # 1. Alias dictionary
+        for alias, pkg in COMMON_APP_MAP.items():
+            if alias == norm or alias in norm or norm in alias:
+                return pkg
+
+        # 2. Substring match against installed packages
+        pkgs = self.get_installed_packages()
+        for pkg in pkgs:
+            clean = pkg.lower().replace(".", "").replace("-", "").replace("_", "")
+            if norm in clean:
+                return pkg
+
+        # 3. Direct check if raw string looks like a valid package
+        if "." in raw and raw in pkgs:
+            return raw
+
+        return None
+
+    def resolve_and_launch_app(self, app_name: str) -> bool:
+        """Resolve app name and launch reliably using am/monkey."""
+        pkg = self.resolve_package_name(app_name)
+        if not pkg:
+            pkg = app_name.strip()
+
+        if pkg == "com.android.settings":
+            self._run_shell("am start -a android.settings.SETTINGS")
+            return True
+
+        # Try monkey launcher first (fastest, standard category launcher)
+        res = self._run_shell(f"monkey -p {pkg} -c android.intent.category.LAUNCHER 1")
+        if "Events injected: 1" in res or "No activities" not in res:
+            return True
+
+        # Fallback to cmd package resolve-activity
+        resolve_out = self._run_shell(f"cmd package resolve-activity --brief {pkg}")
+        lines = [line.strip() for line in resolve_out.splitlines() if line.strip() and not line.startswith("priority=")]
+        if lines:
+            component = lines[-1]
+            if "/" in component:
+                self._run_shell(f"am start -n {component}")
+                return True
+
+        # Fallback to direct monkey
+        self._run_shell(f"monkey -p {pkg} 1")
+        return True
+
     def launch_package(self, package_name: str) -> None:
         """Launch package main activity using monkey or am start."""
-        self._run_shell(
-            f"monkey -p {package_name} -c android.intent.category.LAUNCHER 1"
-        )
+        self.resolve_and_launch_app(package_name)
 
     def force_stop(self, package_name: str) -> None:
         self._run_shell(f"am force-stop {package_name}")
@@ -340,8 +449,7 @@ class AdbDevice(AndroidDevice):
         1. Wake screen & dismiss lock
         2. Force-stop target packages
         3. Clear clipboard
-        4. Return to home launcher
-        5. Verify link connectivity & wait for settle
+        4. Settle screen
         """
         self.wake_screen()
         pkgs = packages_to_stop or [
@@ -356,8 +464,9 @@ class AdbDevice(AndroidDevice):
             self.force_stop(pkg)
 
         self.set_clipboard("")
-        self.press_home()
-        time.sleep(0.6)  # Baseline settle wait for launcher animation
+        if pkgs:
+            self.press_home()
+            time.sleep(0.4)
 
 
 class MockAndroidDevice(AndroidDevice):
@@ -443,6 +552,18 @@ class MockAndroidDevice(AndroidDevice):
     def get_foreground_package(self) -> str:
         self.action_history.append(("get_foreground_package", None))
         return self.current_package
+
+    def resolve_package_name(self, app_name: str) -> Optional[str]:
+        norm = app_name.lower().strip()
+        for k, v in COMMON_APP_MAP.items():
+            if k in norm or norm in k:
+                return v
+        return app_name
+
+    def resolve_and_launch_app(self, app_name: str) -> bool:
+        pkg = self.resolve_package_name(app_name) or app_name
+        self.launch_package(pkg)
+        return True
 
     def launch_package(self, package_name: str) -> None:
         self.action_history.append(("launch_package", package_name))

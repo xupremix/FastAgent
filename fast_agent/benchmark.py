@@ -214,6 +214,23 @@ def verify_device_diagnostic_report(
     return False
 
 
+def verify_custom_instruction(
+    device: AndroidDevice,
+    timings: List[StepTiming],
+    actions: List[Dict[str, Any]],
+) -> bool:
+    """Verifier for custom user tasks:
+    Checks if the agent reached goal and explicitly called terminate(status=success) or answer.
+    Fails if the agent exhausted max steps without achieving success.
+    """
+    for a in actions:
+        if a.get("action") == "terminate":
+            return str(a.get("status", "")).lower() == "success"
+        if a.get("action") == "answer":
+            return True
+    return False
+
+
 def get_standard_tasks() -> List[BenchmarkTask]:
     return [
         BenchmarkTask(
@@ -409,26 +426,8 @@ class BenchmarkRunner:
                     if self.teleport.teleport_telegram_saved():
                         return (time.perf_counter() - t0) * 1000.0
 
-            pkg_map = {
-                "wallapop": "com.wallapop",
-                "notes": "com.miui.notes",
-                "note": "com.miui.notes",
-                "settings": "com.android.settings",
-                "impostazioni": "com.android.settings",
-                "telegram": "org.telegram.messenger",
-                "gallery": "com.miui.gallery",
-                "galleria": "com.miui.gallery",
-                "calculator": "com.miui.calculator",
-                "calcolatrice": "com.miui.calculator",
-            }
-            target_pkg = None
-            for key, val in pkg_map.items():
-                if key in app_name or app_name in key:
-                    target_pkg = val
-                    break
-            if not target_pkg:
-                target_pkg = action.get("text", "")
-            self.device.launch_package(target_pkg)
+            # Universal Package Resolver & Reliable Launcher
+            self.device.resolve_and_launch_app(app_name)
 
         elif act_type == "key":
             key_name = str(action.get("text", "")).lower()
@@ -469,6 +468,9 @@ class BenchmarkRunner:
         total_prompt_tokens = 0
         total_completion_tokens = 0
         error_msg: Optional[str] = None
+        consecutive_stalls = 0
+        last_action_sig = ""
+        last_pkg = ""
 
         for step in range(1, task.max_steps + 1):
             step_start = time.perf_counter()
@@ -652,6 +654,28 @@ class BenchmarkRunner:
             # Update history summary
             history_summary += f"Step {step}: Actions={timing.actions_executed}\n"
 
+            # Stall / Loop Detection: check if identical action chain repeated without state change
+            curr_pkg = self.device.get_foreground_package()
+            curr_action_sig = str(timing.actions_executed)
+            if curr_action_sig == last_action_sig and curr_pkg == last_pkg and not macro_hit:
+                consecutive_stalls += 1
+                print(
+                    f"  ⚠️ [LOOP DETECTED]: Action {curr_action_sig} repeated with 0 state change "
+                    f"(consecutive stalls: {consecutive_stalls})"
+                )
+                history_summary += (
+                    f"[SYSTEM ALERT]: Previous action {curr_action_sig} resulted in NO screen state change! "
+                    "Do NOT repeat this action. Try an alternate approach: click another coordinate, swipe to find element, or verify if already opened.\n"
+                )
+                if consecutive_stalls >= 2 and actions and actions[0].get("action") == "open":
+                    target_app = str(actions[0].get("text", ""))
+                    print(f"  [Auto-Recovery]: Forcing app launch for '{target_app}' via dynamic resolver...")
+                    self.device.resolve_and_launch_app(target_app)
+            else:
+                consecutive_stalls = 0
+                last_action_sig = curr_action_sig
+                last_pkg = curr_pkg
+
             # Check termination
             if any(a.get("action") == "terminate" for a in actions):
                 print(f"Goal termination reported by agent at step {step}.")
@@ -783,6 +807,7 @@ if __name__ == "__main__":
     parser.add_argument("--mock", action="store_true", help="Use deterministic MockAndroidDevice")
     parser.add_argument("--task", type=str, default=None, help="Filter to specific task_id")
     parser.add_argument("--instruction", type=str, default=None, help="Execute ad-hoc custom instruction")
+    parser.add_argument("--max_steps", type=int, default=25, help="Maximum steps allowed per task execution (default: 25)")
     parser.add_argument("--optimize", "--phase1", action="store_true", help="Enable all Phase 1 optimizations")
     parser.add_argument("--phase2", action="store_true", help="Enable Phase 1 + Phase 2 (Intent Teleport + CPU Grounding + Snapping)")
     parser.add_argument("--phase3", action="store_true", help="Enable Phase 1 + 2 + 3 (Procedural Memory + Foveated ROI)")
@@ -828,8 +853,8 @@ if __name__ == "__main__":
                 name="Custom User Instruction",
                 instruction=args.instruction,
                 target_packages=[],
-                max_steps=12,
-                verifier=lambda d, t, a: True,
+                max_steps=args.max_steps,
+                verifier=verify_custom_instruction,
             )
         ]
     elif args.task:

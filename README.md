@@ -100,9 +100,9 @@ Existing vision-language mobile agents (AppAgent, Mobile-Agent, AndroidWorld) sp
 </p>
 
 <details>
-<summary><b>View Mermaid Diagram Source</b></summary>
+<summary><b>View Diagram Flowchart Source</b></summary>
 
-```mermaid
+```text
 flowchart TD
     subgraph UI ["Host & Device Environment"]
         Device["Physical Android Device (Xiaomi, Pixel, Samsung)"]
