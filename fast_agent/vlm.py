@@ -38,34 +38,42 @@ DSL_ACTION_RE = re.compile(
 
 COMPACT_DSL_SYSTEM_PROMPT = """# Tools
 
-You are an ultra-fast mobile device automation agent.
+You are an ultra-fast, zero-overhead mobile device automation agent.
 Screen coordinates are normalized [0, 1000]. Screen resolution is 1220x2712.
 
 # Output Format:
-Keep Observation strictly under 8 words.
-Then output the compact tool call:
+Keep Observation strictly under 6 words.
+Then output the compact tool call immediately:
 <tool_call>ACTION>ACTION</tool_call>
 
 Available compact actions:
 - CLK(x,y): Click coordinate [0-1000]
-- TYP("text"): Type text
-- SWP(x1,y1,x2,y2): Swipe gesture
+- TYP("text"): Instant text typing
+- SWP(x1,y1,x2,y2): Fast swipe gesture
 - KEY(enter|back|home): System key
 - OPN("AppName"): Launch app
-- WAT(sec): Settle wait
+- WAT(sec): Explicit wait (ONLY when waiting for network spinner; never between taps)
 - TRM(success|failure): Terminate task
 
+Rules:
+1. Act like a fast human user: do NOT emit WAT after CLK or OPN. The underlying engine adaptively settles in <30ms.
+2. Chain deterministic actions in a single tool call (e.g. click search bar + type query + enter).
+
 Examples:
-1. Search:
-Observation: Open Wallapop and search
-<tool_call>OPN("Wallapop")>WAT(1.0)>CLK(500,80)>TYP("3060 12gb")>KEY(enter)</tool_call>
+1. Search in app:
+Observation: Open Vinted and search query
+<tool_call>OPN("Vinted")>CLK(500,80)>TYP("be quiet silent base 800")>KEY(enter)</tool_call>
 
-2. Note taking:
-Observation: Add note with price
-<tool_call>OPN("Notes")>CLK(836,853)>TYP("RTX 3060 - 220 EUR")>TRM(success)</tool_call>
+2. Click listing:
+Observation: Open first item
+<tool_call>CLK(500,450)</tool_call>
 
-3. Terminate when done:
-Observation: Calculation verified
+3. Note taking:
+Observation: Record item details
+<tool_call>OPN("Notes")>CLK(836,853)>TYP("Silent Base 800 - 350 EUR")>TRM(success)</tool_call>
+
+4. Terminate when done:
+Observation: Goal completed
 <tool_call>TRM(success)</tool_call>
 """
 
@@ -258,11 +266,31 @@ class VLMClient:
         model = self._ensure_model_name()
         timing = StepTiming(step_index=step_index)
 
+        def map_action_coords(act: Dict[str, Any]) -> Dict[str, Any]:
+            mapped = dict(act)
+            if foveated_crop is not None:
+                if "coordinate" in mapped:
+                    coords = mapped["coordinate"]
+                    norm_x = float(coords[0]) / 1000.0
+                    norm_y = float(coords[1]) / 1000.0
+                    pt = foveated_crop.map_roi_to_global(norm_x, norm_y)
+                    mapped["coordinate"] = [int(round(pt.x * 1000.0)), int(round(pt.y * 1000.0))]
+                if "coordinate2" in mapped:
+                    coords2 = mapped["coordinate2"]
+                    norm_x2 = float(coords2[0]) / 1000.0
+                    norm_y2 = float(coords2[1]) / 1000.0
+                    pt2 = foveated_crop.map_roi_to_global(norm_x2, norm_y2)
+                    mapped["coordinate2"] = [int(round(pt2.x * 1000.0)), int(round(pt2.y * 1000.0))]
+            return mapped
+
         dispatcher = None
         if self.config.enable_speculative_execution and speculative_callback:
             from fast_agent.speculative_execution import StreamingActionDispatcher
 
-            dispatcher = StreamingActionDispatcher(dispatch_callback=speculative_callback)
+            def spec_callback_mapped(act: Dict[str, Any]) -> None:
+                speculative_callback(map_action_coords(act))
+
+            dispatcher = StreamingActionDispatcher(dispatch_callback=spec_callback_mapped)
 
         input_to_encode = foveated_crop.roi_image if foveated_crop else screenshot_png
         effective_max = self.config.foveated_roi_pixels if foveated_crop else self.config.max_pixels
@@ -352,22 +380,7 @@ class VLMClient:
             )
             timing.speculative_time_saved_ms = time_saved
 
-        actions = parse_tool_calls(raw_text)
-
-        if foveated_crop is not None:
-            for act in actions:
-                if "coordinate" in act:
-                    coords = act["coordinate"]
-                    norm_x = float(coords[0]) / 1000.0
-                    norm_y = float(coords[1]) / 1000.0
-                    pt = foveated_crop.map_roi_to_global(norm_x, norm_y)
-                    act["coordinate"] = [int(round(pt.x * 1000.0)), int(round(pt.y * 1000.0))]
-                if "coordinate2" in act:
-                    coords2 = act["coordinate2"]
-                    norm_x2 = float(coords2[0]) / 1000.0
-                    norm_y2 = float(coords2[1]) / 1000.0
-                    pt2 = foveated_crop.map_roi_to_global(norm_x2, norm_y2)
-                    act["coordinate2"] = [int(round(pt2.x * 1000.0)), int(round(pt2.y * 1000.0))]
+        actions = [map_action_coords(a) for a in parse_tool_calls(raw_text)]
 
         timing.actions_executed = [a.get("action", "unknown") for a in actions]
 

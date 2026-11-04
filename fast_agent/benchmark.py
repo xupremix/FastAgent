@@ -439,8 +439,10 @@ class BenchmarkRunner:
                 self.device.press_home()
 
         elif act_type == "wait":
-            sec = float(action.get("time", 1.0))
-            time.sleep(min(sec, 3.0))
+            sec = float(action.get("time", 0.05))
+            # Adaptive settling at human speed instead of hard blocking sleep
+            if sec > 0:
+                self.device.settle(timeout_s=min(sec, 0.15))
 
         elif act_type == "terminate":
             pass
