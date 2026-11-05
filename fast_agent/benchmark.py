@@ -17,10 +17,12 @@ Implements:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 import math
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -41,6 +43,7 @@ from fast_agent.device import AdbDevice, AndroidDevice, MockAndroidDevice
 from fast_agent.distillation import TrajectoryDistiller, TrajectoryTurn
 from fast_agent.foveated_roi import FoveatedCropResult, FoveatedVisualCompressor
 from fast_agent.intent_teleport import IntentTeleportEngine
+from fast_agent.planner import TaskPlan, TaskPlanner
 from fast_agent.procedural_memory import ProceduralMemory
 from fast_agent.scroll_dead_reckoning import ScrollDeadReckoner
 from fast_agent.vlm import VLMClient
@@ -221,8 +224,14 @@ def verify_custom_instruction(
 ) -> bool:
     """Verifier for custom user tasks:
     Checks if the agent reached goal and explicitly called terminate(status=success) or answer.
-    Fails if the agent exhausted max steps without achieving success.
+    Fails if the agent did zero meaningful actions and exited prematurely at step 1.
     """
+    meaningful_actions = [
+        a for a in actions if a.get("action") not in ("wait", "terminate")
+    ]
+    if not meaningful_actions and len(timings) <= 1:
+        return False
+
     for a in actions:
         if a.get("action") == "terminate":
             return str(a.get("status", "")).lower() == "success"
@@ -345,6 +354,8 @@ class BenchmarkRunner:
             if self.config.enable_trajectory_distillation
             else None
         )
+        self.planner: TaskPlanner = TaskPlanner(self.config)
+        self._current_plan: Optional[TaskPlan] = None
 
     def _execute_action(self, action: Dict[str, Any]) -> float:
         """Execute a single parsed action on the device and return input_inject_ms."""
@@ -411,16 +422,24 @@ class BenchmarkRunner:
         elif act_type == "open":
             app_name = str(action.get("text", "")).lower().strip()
 
-            # Phase 2a: Direct Intent Teleportation
+            # Phase 2a: Direct Intent Teleportation (Driven by LLM Task Plan, Zero Regex)
             if self.config.enable_intent_teleport and self.teleport:
-                if "wallapop" in app_name:
-                    if self.teleport.teleport_marketplace_search("3060 12gb"):
+                plan = getattr(self, "_current_plan", None)
+                search_q = (plan.search_query if plan and plan.search_query else "").strip()
+
+                if any(k in app_name for k in ["wallapop", "vinted", "subito", "ebay"]):
+                    matched_app = (
+                        "wallapop"
+                        if "wallapop" in app_name
+                        else ("vinted" if "vinted" in app_name else ("subito" if "subito" in app_name else "ebay"))
+                    )
+                    if search_q and self.teleport.teleport_marketplace_search(search_q, app=matched_app):
                         return (time.perf_counter() - t0) * 1000.0
                 elif any(k in app_name for k in ["battery", "batteria", "settings", "impostazioni"]):
                     if self.teleport.teleport_battery_settings():
                         return (time.perf_counter() - t0) * 1000.0
                 elif any(k in app_name for k in ["notes", "note"]):
-                    if self.teleport.teleport_create_note(""):
+                    if self.teleport.teleport_create_note(search_q):
                         return (time.perf_counter() - t0) * 1000.0
                 elif "telegram" in app_name:
                     if self.teleport.teleport_telegram_saved():
@@ -463,6 +482,21 @@ class BenchmarkRunner:
         self.device.pre_run_reset(task.target_packages)
         t_reset_end = time.perf_counter()
         print(f"Pre-run reset completed in {(t_reset_end - t_reset_start)*1000:.1f}ms")
+
+        # Generate LLM Plan for task (zero regex)
+        self._current_instruction = task.instruction
+        self._current_plan = None
+        try:
+            self._current_plan = self.planner.plan(task.instruction)
+            if self._current_plan and self._current_plan.steps:
+                print(
+                    f"🎯 [LLM Plan Generated]: App={self._current_plan.target_app}, "
+                    f"Query={self._current_plan.search_query}, Category={self._current_plan.intent_category}"
+                )
+                for s in self._current_plan.steps:
+                    print(f"   {s}")
+        except Exception as e:
+            print(f"⚠️ LLM Planner error: {e}")
 
         history_summary = ""
         timings: List[StepTiming] = []
@@ -560,11 +594,21 @@ class BenchmarkRunner:
                         instruction=task.instruction,
                         step_index=step,
                         history_summary=history_summary,
+                        plan=self._current_plan.formatted_plan if self._current_plan else "",
                         foveated_crop=foveated_result,
                         speculative_callback=on_speculative_action,
                     )
                     preview = raw_text.strip().replace("\n", " ")[:140]
                     print(f"  [Model Output Preview]: {preview}...")
+
+                    # Prevent early premature exit at step 1 (where model did zero work)
+                    if step == 1 and all(a.get("action") == "terminate" for a in actions):
+                        print("  ⚠️ Premature termination at step 1 detected (zero actions). Forcing step execution from LLM plan...")
+                        if self._current_plan and self._current_plan.target_app:
+                            app_to_open = self._current_plan.target_app
+                            print(f"  -> Discarding premature exit, opening planned target app: {app_to_open}")
+                            actions = [{"action": "open", "text": app_to_open}]
+                            timing.actions_executed = ["open"]
                 except Exception as e:
                     error_msg = f"VLM Exception: {e}"
                     print(f"ERROR: {error_msg}")
@@ -849,9 +893,10 @@ if __name__ == "__main__":
 
     tasks = get_standard_tasks()
     if args.instruction:
+        inst_slug = hashlib.sha256(args.instruction.strip().lower().encode("utf-8")).hexdigest()[:10]
         tasks = [
             BenchmarkTask(
-                task_id="custom_user_task",
+                task_id=f"custom_{inst_slug}",
                 name="Custom User Instruction",
                 instruction=args.instruction,
                 target_packages=[],

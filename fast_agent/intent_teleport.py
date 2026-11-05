@@ -39,9 +39,25 @@ class IntentTeleportEngine:
     def teleport_marketplace_search(self, query: str, app: str = "wallapop") -> bool:
         """Teleport directly to marketplace search results screen in 120ms."""
         encoded = urllib.parse.quote(query)
-        if app.lower() == "wallapop":
+        app_l = app.lower()
+        if "wallapop" in app_l:
             url = f"https://it.wallapop.com/app/search?keywords={encoded}"
             cmd = f"am start -a android.intent.action.VIEW -d {shlex.quote(url)} -p com.wallapop"
+            out = self._run_shell(cmd)
+            return "Starting: Intent" in out
+        elif "vinted" in app_l:
+            url = f"https://www.vinted.it/catalog?search_text={encoded}"
+            cmd = f"am start -a android.intent.action.VIEW -d {shlex.quote(url)} -p fr.vinted"
+            out = self._run_shell(cmd)
+            return "Starting: Intent" in out or "Warning: Activity not started" in out
+        elif "subito" in app_l:
+            url = f"https://www.subito.it/annunci-italia/vendita/usato/?q={encoded}"
+            cmd = f"am start -a android.intent.action.VIEW -d {shlex.quote(url)} -p it.subito"
+            out = self._run_shell(cmd)
+            return "Starting: Intent" in out
+        elif "ebay" in app_l:
+            url = f"https://www.ebay.it/sch/i.html?_nkw={encoded}"
+            cmd = f"am start -a android.intent.action.VIEW -d {shlex.quote(url)} -p com.ebay.mobile"
             out = self._run_shell(cmd)
             return "Starting: Intent" in out
         return False
